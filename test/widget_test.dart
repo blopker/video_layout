@@ -1,9 +1,4 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
+// Smoke tests for the Adaptive Call Layout prototype.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,20 +6,23 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:video_layout/main.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  testWidgets('prototype boots and shows the speaker tile', (tester) async {
+    await tester.pumpWidget(const PrototypeApp());
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+    expect(find.text('Active Speaker'), findsOneWidget);
+    // Default state shows 4 participants in the grid.
+    expect(find.text('Adaptive Call Layout'), findsOneWidget);
+  });
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
+  testWidgets('participants slider drives the grid', (tester) async {
+    await tester.pumpWidget(const PrototypeApp());
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    // Dragging the participants slider down to 0 should remove named tiles
+    // but keep the featured speaker.
+    final slider = find.byType(Slider).first;
+    await tester.drag(slider, const Offset(-1000, 0));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Active Speaker'), findsOneWidget);
   });
 }

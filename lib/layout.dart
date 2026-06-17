@@ -19,7 +19,7 @@ import 'package:flutter/widgets.dart';
 /// You only supply the video widgets — drop any [Widget] into [speaker] and
 /// [participants] (a texture, platform view, image, decorated box, etc.).
 ///
-class AdaptiveCallLayout extends StatelessWidget {
+class AdaptiveCallLayout extends StatefulWidget {
   const AdaptiveCallLayout({
     super.key,
     required this.participants,
@@ -65,7 +65,22 @@ class AdaptiveCallLayout extends StatelessWidget {
   final double portraitMaxStrip;
 
   @override
+  State<AdaptiveCallLayout> createState() => _AdaptiveCallLayoutState();
+}
+
+class _AdaptiveCallLayoutState extends State<AdaptiveCallLayout> {
+  // Stable across rebuilds. Anchoring the grid to a GlobalKey lets it survive
+  // structural swaps — desktop↔mobile orientation and speaker on↔off — by
+  // being *reparented* rather than torn down and rebuilt, so each tile's state
+  // (and its bound video stream) is preserved through those transitions.
+  final GlobalKey _gridKey = GlobalKey();
+
+  @override
   Widget build(BuildContext context) {
+    final participants = widget.participants;
+    final spacing = widget.spacing;
+    final speaker = widget.speaker;
+
     return LayoutBuilder(
       builder: (context, constraints) {
         final spec = _solve(
@@ -73,21 +88,34 @@ class AdaptiveCallLayout extends StatelessWidget {
           height: constraints.maxHeight.isFinite ? constraints.maxHeight : 0,
         );
 
-        // Build the participant grid: a centred Wrap of fixed-size tiles whose
+        // Build the participant grid: a centered Wrap of fixed-size tiles whose
         // width is pinned so exactly `cols` fit per row.
         Widget? grid;
         if (participants.isNotEmpty && spec.tileW > 0 && spec.tileH > 0) {
-          grid = SizedBox(
-            width: spec.gridContentWidth,
-            child: Wrap(
-              spacing: spacing,
-              runSpacing: spacing,
-              alignment: WrapAlignment.center,
-              runAlignment: WrapAlignment.center,
-              children: [
-                for (final p in participants)
-                  SizedBox(width: spec.tileW, height: spec.tileH, child: p),
-              ],
+          grid = KeyedSubtree(
+            key: _gridKey,
+            child: SizedBox(
+              width: spec.gridContentWidth,
+              child: Wrap(
+                spacing: spacing,
+                runSpacing: spacing,
+                alignment: WrapAlignment.center,
+                runAlignment: WrapAlignment.center,
+                children: [
+                  for (final p in participants)
+                    // Propagate the caller's key past the SizedBox wrapper so a
+                    // reordered participant list reuses element/state correctly
+                    // (otherwise tiles are matched by index and state leaks).
+                    KeyedSubtree(
+                      key: p.key,
+                      child: SizedBox(
+                        width: spec.tileW,
+                        height: spec.tileH,
+                        child: p,
+                      ),
+                    ),
+                ],
+              ),
             ),
           );
         }
@@ -108,25 +136,22 @@ class AdaptiveCallLayout extends StatelessWidget {
         } else if (grid == null) {
           // Speaker only.
           content = Center(child: featured);
-        } else if (spec.isRow) {
-          // Landscape: speaker left, listeners right, centred as a group.
-          content = Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              featured,
-              SizedBox(width: spacing),
-              Flexible(child: grid),
-            ],
-          );
         } else {
-          // Portrait / mobile: speaker pinned to the top, strip below.
-          content = Column(
-            mainAxisAlignment: MainAxisAlignment.start,
+          // Speaker + grid. Use Flex (not Row/Column) so the widget type stays
+          // constant across the breakpoint — only the axis changes, so the
+          // element updates in place instead of being rebuilt.
+          content = Flex(
+            direction: spec.isRow ? Axis.horizontal : Axis.vertical,
+            mainAxisAlignment: spec.isRow
+                ? MainAxisAlignment.center
+                : MainAxisAlignment.start,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               featured,
-              SizedBox(height: spacing),
+              SizedBox(
+                width: spec.isRow ? spacing : 0,
+                height: spec.isRow ? 0 : spacing,
+              ),
               Flexible(child: grid),
             ],
           );
@@ -139,12 +164,20 @@ class AdaptiveCallLayout extends StatelessWidget {
 
   /// Pure layout solver — no side effects, depends only on the incoming size.
   _LayoutSpec _solve({required double width, required double height}) {
+    final speaker = widget.speaker;
+    final participants = widget.participants;
+    final spacing = widget.spacing;
+    final speakerMaxWidthFraction = widget.speakerMaxWidthFraction;
+    final portraitMinStrip = widget.portraitMinStrip;
+    final portraitMinStripFraction = widget.portraitMinStripFraction;
+    final portraitMaxStrip = widget.portraitMaxStrip;
+
     final w = math.max(60.0, width);
     final h = math.max(60.0, height);
-    final aspect = tileAspectRatio; // width / height
+    final aspect = widget.tileAspectRatio; // width / height
 
-    final mobile = w < mobileBreakpoint;
-    final pad = mobile ? mobilePadding : desktopPadding;
+    final mobile = w < widget.mobileBreakpoint;
+    final pad = mobile ? widget.mobilePadding : widget.desktopPadding;
     final iw = math.max(40.0, w - 2 * pad); // usable content width
     final ih = math.max(40.0, h - 2 * pad); // usable content height
     final isRow = !mobile;
@@ -221,7 +254,7 @@ class AdaptiveCallLayout extends StatelessWidget {
     );
   }
 
-  /// Pick the column count that maximises tile size while keeping the fixed
+  /// Pick the column count that maximizes tile size while keeping the fixed
   /// aspect ratio and fitting `m` tiles within `W` x `H`.
   static _Grid _bestGrid(int m, double W, double H, double gap, double aspect) {
     W = math.max(0, W);
