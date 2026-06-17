@@ -19,7 +19,13 @@ import 'package:flutter/widgets.dart';
 /// You only supply the video widgets — drop any [Widget] into [speaker] and
 /// [participants] (a texture, platform view, image, decorated box, etc.).
 ///
-class AdaptiveCallLayout extends StatefulWidget {
+/// Layout is done by a single [CustomMultiChildLayout]: one render object holds
+/// every tile and just re-positions them in [_CallLayoutDelegate.performLayout]
+/// when the size changes. There is no `LayoutBuilder` rebuild on resize and no
+/// orientation-dependent widget swap, so tile state (and bound video streams)
+/// survives the breakpoint and the speaker toggle automatically — keys on the
+/// [participants] are enough to keep state attached across reorders.
+class AdaptiveCallLayout extends StatelessWidget {
   const AdaptiveCallLayout({
     super.key,
     required this.participants,
@@ -33,7 +39,7 @@ class AdaptiveCallLayout extends StatefulWidget {
     this.portraitMinStripFraction = 0.20,
     this.portraitMinStrip = 70,
     this.portraitMaxStrip = 150,
-  });
+  }) : assert(tileAspectRatio > 0, 'tileAspectRatio must be > 0');
 
   /// The active speaker, rendered large. Pass `null` for no featured tile.
   final Widget? speaker;
@@ -65,125 +71,178 @@ class AdaptiveCallLayout extends StatefulWidget {
   final double portraitMaxStrip;
 
   @override
-  State<AdaptiveCallLayout> createState() => _AdaptiveCallLayoutState();
+  Widget build(BuildContext context) {
+    return CustomMultiChildLayout(
+      delegate: _CallLayoutDelegate(
+        hasSpeaker: speaker != null,
+        participantCount: participants.length,
+        spacing: spacing,
+        tileAspectRatio: tileAspectRatio,
+        mobileBreakpoint: mobileBreakpoint,
+        desktopPadding: desktopPadding,
+        mobilePadding: mobilePadding,
+        speakerMaxWidthFraction: speakerMaxWidthFraction,
+        portraitMinStripFraction: portraitMinStripFraction,
+        portraitMinStrip: portraitMinStrip,
+        portraitMaxStrip: portraitMaxStrip,
+      ),
+      children: [
+        if (speaker != null)
+          LayoutId(
+            id: _speakerSlot,
+            child: RepaintBoundary(child: speaker!),
+          ),
+        // The id is positional (= grid slot); the caller's key drives element
+        // reuse, so a reordered participant moves to its new slot with state
+        // intact. RepaintBoundary isolates each (continuously repainting) tile.
+        for (var i = 0; i < participants.length; i++)
+          LayoutId(
+            key: participants[i].key,
+            id: i,
+            child: RepaintBoundary(child: participants[i]),
+          ),
+      ],
+    );
+  }
 }
 
-class _AdaptiveCallLayoutState extends State<AdaptiveCallLayout> {
-  // Stable across rebuilds. Anchoring the grid to a GlobalKey lets it survive
-  // structural swaps — desktop↔mobile orientation and speaker on↔off — by
-  // being *reparented* rather than torn down and rebuilt, so each tile's state
-  // (and its bound video stream) is preserved through those transitions.
-  final GlobalKey _gridKey = GlobalKey();
+/// Layout id for the featured speaker slot. Participant slots use their integer
+/// index, so this just needs to be a stable, distinct, equatable value.
+const Object _speakerSlot = #speaker;
+
+/// Positions the speaker + participant tiles. All geometry comes from [_solve];
+/// this delegate only maps the resolved spec onto child offsets.
+class _CallLayoutDelegate extends MultiChildLayoutDelegate {
+  _CallLayoutDelegate({
+    required this.hasSpeaker,
+    required this.participantCount,
+    required this.spacing,
+    required this.tileAspectRatio,
+    required this.mobileBreakpoint,
+    required this.desktopPadding,
+    required this.mobilePadding,
+    required this.speakerMaxWidthFraction,
+    required this.portraitMinStripFraction,
+    required this.portraitMinStrip,
+    required this.portraitMaxStrip,
+  });
+
+  final bool hasSpeaker;
+  final int participantCount;
+  final double spacing;
+  final double tileAspectRatio;
+  final double mobileBreakpoint;
+  final double desktopPadding;
+  final double mobilePadding;
+  final double speakerMaxWidthFraction;
+  final double portraitMinStripFraction;
+  final double portraitMinStrip;
+  final double portraitMaxStrip;
 
   @override
-  Widget build(BuildContext context) {
-    final participants = widget.participants;
-    final spacing = widget.spacing;
-    final speaker = widget.speaker;
+  void performLayout(Size size) {
+    final spec = _solve(width: size.width, height: size.height);
+    final pad = spec.padding;
+    final contentW = math.max(0.0, size.width - 2 * pad);
+    final contentH = math.max(0.0, size.height - 2 * pad);
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final spec = _solve(
-          width: constraints.maxWidth.isFinite ? constraints.maxWidth : 0,
-          height: constraints.maxHeight.isFinite ? constraints.maxHeight : 0,
+    // A degenerate (zero-area) speaker or grid is hidden, mirroring the old
+    // `> 0` guards: such children still must be laid out exactly once.
+    final showSpeaker = hasSpeaker && spec.speakerW > 0 && spec.speakerH > 0;
+    final showGrid = participantCount > 0 && spec.tileW > 0 && spec.tileH > 0;
+
+    final gridW = spec.gridContentWidth;
+    final gridH = spec.rows > 0
+        ? spec.rows * spec.tileH + (spec.rows - 1) * spacing
+        : 0.0;
+
+    // Resolve the top-left of the speaker box and of the grid block, matching
+    // the old Flex/Center behaviour exactly.
+    var speakerPos = Offset(pad, pad);
+    var gridPos = Offset(pad, pad);
+    if (showSpeaker && showGrid) {
+      if (spec.isRow) {
+        // Landscape: [speaker | gap | grid] centred as a group, v-centred.
+        final groupW = spec.speakerW + spacing + gridW;
+        final startX = pad + math.max(0.0, (contentW - groupW) / 2);
+        speakerPos = Offset(startX, pad + (contentH - spec.speakerH) / 2);
+        gridPos = Offset(
+          startX + spec.speakerW + spacing,
+          pad + (contentH - gridH) / 2,
         );
+      } else {
+        // Portrait: speaker pinned to the top, grid below; both h-centred.
+        speakerPos = Offset(pad + (contentW - spec.speakerW) / 2, pad);
+        gridPos = Offset(
+          pad + (contentW - gridW) / 2,
+          pad + spec.speakerH + spacing,
+        );
+      }
+    } else if (showSpeaker) {
+      speakerPos = Offset(
+        pad + (contentW - spec.speakerW) / 2,
+        pad + (contentH - spec.speakerH) / 2,
+      );
+    } else if (showGrid) {
+      gridPos = Offset(
+        pad + (contentW - gridW) / 2,
+        pad + (contentH - gridH) / 2,
+      );
+    }
 
-        // Build the participant grid: a centered Wrap of fixed-size tiles whose
-        // width is pinned so exactly `cols` fit per row.
-        Widget? grid;
-        if (participants.isNotEmpty && spec.tileW > 0 && spec.tileH > 0) {
-          grid = KeyedSubtree(
-            key: _gridKey,
-            child: SizedBox(
-              width: spec.gridContentWidth,
-              child: Wrap(
-                spacing: spacing,
-                runSpacing: spacing,
-                alignment: WrapAlignment.center,
-                runAlignment: WrapAlignment.center,
-                children: [
-                  for (final p in participants)
-                    // Propagate the caller's key past the SizedBox wrapper so a
-                    // reordered participant list reuses element/state correctly
-                    // (otherwise tiles are matched by index and state leaks).
-                    KeyedSubtree(
-                      key: p.key,
-                      child: SizedBox(
-                        width: spec.tileW,
-                        height: spec.tileH,
-                        child: p,
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          );
-        }
+    // Speaker — laid out exactly once (sized to zero when hidden).
+    if (hasChild(_speakerSlot)) {
+      if (showSpeaker) {
+        layoutChild(
+          _speakerSlot,
+          BoxConstraints.tight(Size(spec.speakerW, spec.speakerH)),
+        );
+        positionChild(_speakerSlot, speakerPos);
+      } else {
+        layoutChild(_speakerSlot, BoxConstraints.tight(Size.zero));
+      }
+    }
 
-        Widget? featured;
-        if (speaker != null && spec.speakerW > 0 && spec.speakerH > 0) {
-          featured = SizedBox(
-            width: spec.speakerW,
-            height: spec.speakerH,
-            child: speaker,
-          );
-        }
-
-        late final Widget content;
-        if (featured == null) {
-          // No speaker tile (e.g. you are speaking): just the centred grid.
-          content = Center(child: grid ?? const SizedBox.shrink());
-        } else if (grid == null) {
-          // Speaker only.
-          content = Center(child: featured);
-        } else {
-          // Speaker + grid. Use Flex (not Row/Column) so the widget type stays
-          // constant across the breakpoint — only the axis changes, so the
-          // element updates in place instead of being rebuilt.
-          content = Flex(
-            direction: spec.isRow ? Axis.horizontal : Axis.vertical,
-            mainAxisAlignment: spec.isRow
-                ? MainAxisAlignment.center
-                : MainAxisAlignment.start,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              featured,
-              SizedBox(
-                width: spec.isRow ? spacing : 0,
-                height: spec.isRow ? 0 : spacing,
-              ),
-              Flexible(child: grid),
-            ],
-          );
-        }
-
-        return Padding(padding: EdgeInsets.all(spec.padding), child: content);
-      },
-    );
+    // Participant tiles — each laid out exactly once. Rows are centred and the
+    // final partial row is centred within the grid width (matches Wrap).
+    for (var i = 0; i < participantCount; i++) {
+      if (!hasChild(i)) continue;
+      if (!showGrid) {
+        layoutChild(i, BoxConstraints.tight(Size.zero));
+        continue;
+      }
+      final r = i ~/ spec.cols;
+      final c = i % spec.cols;
+      final inRow = (r < spec.rows - 1)
+          ? spec.cols
+          : participantCount - (spec.rows - 1) * spec.cols;
+      final rowW = inRow * spec.tileW + (inRow - 1) * spacing;
+      final rowStartX = gridPos.dx + (gridW - rowW) / 2;
+      layoutChild(i, BoxConstraints.tight(Size(spec.tileW, spec.tileH)));
+      positionChild(
+        i,
+        Offset(
+          rowStartX + c * (spec.tileW + spacing),
+          gridPos.dy + r * (spec.tileH + spacing),
+        ),
+      );
+    }
   }
 
   /// Pure layout solver — no side effects, depends only on the incoming size.
   _LayoutSpec _solve({required double width, required double height}) {
-    final speaker = widget.speaker;
-    final participants = widget.participants;
-    final spacing = widget.spacing;
-    final speakerMaxWidthFraction = widget.speakerMaxWidthFraction;
-    final portraitMinStrip = widget.portraitMinStrip;
-    final portraitMinStripFraction = widget.portraitMinStripFraction;
-    final portraitMaxStrip = widget.portraitMaxStrip;
-
     final w = math.max(60.0, width);
     final h = math.max(60.0, height);
-    final aspect = widget.tileAspectRatio; // width / height
+    final aspect = tileAspectRatio; // width / height
 
-    final mobile = w < widget.mobileBreakpoint;
-    final pad = mobile ? widget.mobilePadding : widget.desktopPadding;
+    final mobile = w < mobileBreakpoint;
+    final pad = mobile ? mobilePadding : desktopPadding;
     final iw = math.max(40.0, w - 2 * pad); // usable content width
     final ih = math.max(40.0, h - 2 * pad); // usable content height
     final isRow = !mobile;
 
-    final hasFeatured = speaker != null;
-    final m = participants.length;
+    final hasFeatured = hasSpeaker;
+    final m = participantCount;
 
     double fw = 0, fh = 0, gridW = iw, gridH = ih;
 
@@ -271,9 +330,24 @@ class _AdaptiveCallLayoutState extends State<AdaptiveCallLayout> {
     }
     return best;
   }
+
+  @override
+  bool shouldRelayout(_CallLayoutDelegate old) =>
+      hasSpeaker != old.hasSpeaker ||
+      participantCount != old.participantCount ||
+      spacing != old.spacing ||
+      tileAspectRatio != old.tileAspectRatio ||
+      mobileBreakpoint != old.mobileBreakpoint ||
+      desktopPadding != old.desktopPadding ||
+      mobilePadding != old.mobilePadding ||
+      speakerMaxWidthFraction != old.speakerMaxWidthFraction ||
+      portraitMinStripFraction != old.portraitMinStripFraction ||
+      portraitMinStrip != old.portraitMinStrip ||
+      portraitMaxStrip != old.portraitMaxStrip;
 }
 
-/// Result of [_bestGrid]: a grid of `cols` x `rows` tiles sized `tileW`/`tileH`.
+/// Result of [_CallLayoutDelegate._bestGrid]: `cols` x `rows` tiles sized
+/// `tileW`/`tileH`.
 class _Grid {
   const _Grid(this.cols, this.rows, this.tileW, this.tileH);
   final int cols;
@@ -313,10 +387,12 @@ class _LayoutSpec {
 //   AdaptiveCallLayout(
 //     speaker: VideoView(stream: activeSpeakerStream),   // null while you speak
 //     participants: [
-//       for (final p in otherParticipants) VideoView(stream: p.stream),
+//       for (final p in otherParticipants)
+//         VideoView(key: ValueKey(p.id), stream: p.stream),
 //     ],
 //   )
 //
 // `speaker` and each `participants[i]` are laid out into correctly-sized boxes;
 // make your video widget fill its box (e.g. FittedBox(fit: BoxFit.cover, ...)).
+// Give each participant a stable key so its tile state survives reorders.
 // ───────────────────────────────────────────────────────────────────────────
