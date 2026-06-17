@@ -89,6 +89,10 @@ class AdaptiveCallLayout extends StatelessWidget {
       children: [
         if (speaker != null)
           LayoutId(
+            // Carry the speaker's key so a participant promoted into (or
+            // demoted out of) the featured slot reuses its element — state and
+            // bound video stream ride along instead of being rebound.
+            key: speaker!.key,
             id: _speakerSlot,
             child: RepaintBoundary(child: speaker!),
           ),

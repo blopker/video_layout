@@ -1,6 +1,7 @@
-// Verifies that participant tile state survives the structural transitions
-// that used to tear the grid down: the desktop↔mobile breakpoint (Row/Column →
-// Flex) and the featured-speaker toggle (Center ↔ Flex, bridged by a GlobalKey).
+// Verifies the CustomMultiChildLayout engine: tile state survives the
+// structural transitions (speaker toggle, desktop↔mobile breakpoint, and
+// featured↔grid rotation) because everything lives in one layout render
+// object, and checks the resolved geometry in row and column modes.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -162,5 +163,41 @@ void main() {
         reason: 'grid is below the speaker in column mode',
       );
     }
+  });
+
+  testWidgets('rotation across the featured slot preserves keyed state', (
+    tester,
+  ) async {
+    _inits = 0;
+
+    Widget app({required Key featured, required Key participant}) {
+      return Directionality(
+        textDirection: TextDirection.ltr,
+        child: Center(
+          child: SizedBox(
+            width: 900,
+            height: 600,
+            child: AdaptiveCallLayout(
+              speaker: _Probe(key: featured),
+              participants: [_Probe(key: participant)],
+            ),
+          ),
+        ),
+      );
+    }
+
+    await tester.pumpWidget(
+      app(featured: const ValueKey('a'), participant: const ValueKey('b')),
+    );
+    expect(_inits, 2);
+
+    // Rotate: 'b' is promoted into the featured slot, 'a' demoted to the grid.
+    // Both elements should be reused — no fresh initState — because the engine
+    // carries the speaker's key onto its LayoutId.
+    await tester.pumpWidget(
+      app(featured: const ValueKey('b'), participant: const ValueKey('a')),
+    );
+    await tester.pump();
+    expect(_inits, 2, reason: 'tiles reused across the featured↔grid boundary');
   });
 }

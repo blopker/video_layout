@@ -39,26 +39,36 @@ class _PrototypeHomeState extends State<PrototypeHome> {
   double _spacing = 10;
   bool _showStats = true;
   bool _webcamReady = false;
-  bool _useKeys = false; // #3: propagate stable keys to the layout's tiles?
 
-  // Stable participant identities, so a shuffle reorders the *same* people.
-  final List<int> _ids = [1, 2, 3, 4];
+  // The local user. Always in the call, but never shown to themselves: when
+  // *they* are the active speaker, the featured slot is empty (no self-view).
+  static const _meId = 0;
+
+  // Ordered queue of stable person ids; index 0 is the active speaker. `me`
+  // starts mid-queue so the default view features someone else.
+  final List<int> _queue = [1, 2, _meId, 3, 4];
   int _nextId = 5;
 
-  int get _participantCount => _ids.length;
+  int get _peopleCount => _queue.length;
+
+  String _nameOf(int id) => id == _meId ? 'You' : _names[id % _names.length];
 
   void _setCount(int n) {
     setState(() {
-      while (_ids.length < n) {
-        _ids.add(_nextId++);
+      while (_queue.length < n) {
+        _queue.add(_nextId++);
       }
-      while (_ids.length > n) {
-        _ids.removeLast();
+      // Shrink from the back, but never drop the local user.
+      while (_queue.length > n) {
+        final i = _queue.lastIndexWhere((id) => id != _meId);
+        if (i < 0) break;
+        _queue.removeAt(i);
       }
     });
   }
 
-  void _shuffle() => setState(() => _ids.shuffle());
+  // Active speaker moves to the back; the next person is promoted.
+  void _rotate() => setState(() => _queue.add(_queue.removeAt(0)));
 
   static const _aspects = <String, double>{
     '4:5': 4 / 5,
@@ -81,45 +91,58 @@ class _PrototypeHomeState extends State<PrototypeHome> {
     // One live <video> per tile, all bound to the same camera stream.
     Widget? video() => _webcamReady ? buildWebcamView() : null;
 
+    // A tile for one person. The same widget type is used featured or in the
+    // grid, so (with keys) its state survives a promotion/demotion.
+    _FakeVideo tileFor(int id, {bool featured = false}) => _FakeVideo(
+      // A stable per-person key so each tile's state (and its bound video
+      // stream) follows the person across a rotation — including across the
+      // featured↔grid boundary.
+      key: ValueKey(id),
+      label: _nameOf(id),
+      seed: id,
+      speaking: featured,
+      big: featured,
+      video: video(),
+    );
+
+    // Rendered from the local user's perspective. The active speaker is
+    // featured — unless that's *me*, in which case there's no featured tile
+    // (no self-view) and I drop out of the grid too. Otherwise I appear in the
+    // grid like everyone else (self-view while not presenting).
+    final activeId = _showSpeaker && _queue.isNotEmpty ? _queue.first : null;
+    final iAmSpeaker = activeId == _meId;
+    final featuredId = (activeId != null && !iAmSpeaker) ? activeId : null;
+    final gridIds = _queue.where(
+      (id) => id != featuredId && !(iAmSpeaker && id == _meId),
+    );
+
     final layout = AdaptiveCallLayout(
       tileAspectRatio: _aspect,
       spacing: _spacing,
-      speaker: _showSpeaker
-          ? _FakeVideo(
-              label: 'Active Speaker',
-              seed: 0,
-              speaking: true,
-              big: true,
-              video: video(),
-            )
-          : null,
-      participants: [
-        for (final id in _ids)
-          _FakeVideo(
-            // #3: with keys, per-tile state follows the person across a
-            // shuffle; without, it stays glued to the slot.
-            key: _useKeys ? ValueKey(id) : null,
-            label: _names[id % _names.length],
-            seed: id,
-            video: video(),
-          ),
-      ],
+      speaker: featuredId != null ? tileFor(featuredId, featured: true) : null,
+      participants: [for (final id in gridIds) tileFor(id)],
     );
+
+    final viewStatus = !_showSpeaker
+        ? 'equal grid (no active speaker)'
+        : iAmSpeaker
+        ? "you're presenting — no self-view"
+        : 'watching ${_nameOf(activeId!)}';
 
     return Scaffold(
       body: Row(
         children: [
           _ControlPanel(
-            participantCount: _participantCount,
+            peopleCount: _peopleCount,
             showSpeaker: _showSpeaker,
             aspect: _aspect,
             spacing: _spacing,
             showStats: _showStats,
-            useKeys: _useKeys,
             aspects: _aspects,
+            canRotate: _showSpeaker && _peopleCount >= 2,
+            viewStatus: viewStatus,
             onParticipants: _setCount,
-            onShuffle: _shuffle,
-            onUseKeys: (v) => setState(() => _useKeys = v),
+            onRotate: _rotate,
             onShowSpeaker: (v) => setState(() => _showSpeaker = v),
             onAspect: (v) => setState(() => _aspect = v),
             onSpacing: (v) => setState(() => _spacing = v),
@@ -169,32 +192,32 @@ class _PrototypeHomeState extends State<PrototypeHome> {
 
 class _ControlPanel extends StatelessWidget {
   const _ControlPanel({
-    required this.participantCount,
+    required this.peopleCount,
     required this.showSpeaker,
     required this.aspect,
     required this.spacing,
     required this.showStats,
-    required this.useKeys,
     required this.aspects,
+    required this.canRotate,
+    required this.viewStatus,
     required this.onParticipants,
-    required this.onShuffle,
-    required this.onUseKeys,
+    required this.onRotate,
     required this.onShowSpeaker,
     required this.onAspect,
     required this.onSpacing,
     required this.onShowStats,
   });
 
-  final int participantCount;
+  final int peopleCount;
   final bool showSpeaker;
   final double aspect;
   final double spacing;
   final bool showStats;
-  final bool useKeys;
   final Map<String, double> aspects;
+  final bool canRotate;
+  final String viewStatus;
   final ValueChanged<int> onParticipants;
-  final VoidCallback onShuffle;
-  final ValueChanged<bool> onUseKeys;
+  final VoidCallback onRotate;
   final ValueChanged<bool> onShowSpeaker;
   final ValueChanged<double> onAspect;
   final ValueChanged<double> onSpacing;
@@ -230,13 +253,13 @@ class _ControlPanel extends StatelessWidget {
       ),
       const SizedBox(height: 24),
 
-      _Label('Participants: $participantCount'),
+      _Label('People in call: $peopleCount (incl. you)'),
       Slider(
-        value: participantCount.toDouble(),
-        min: 0,
+        value: peopleCount.toDouble(),
+        min: 1,
         max: 12,
-        divisions: 12,
-        label: '$participantCount',
+        divisions: 11,
+        label: '$peopleCount',
         onChanged: (v) => onParticipants(v.round()),
       ),
 
@@ -249,30 +272,44 @@ class _ControlPanel extends StatelessWidget {
       ),
 
       const Divider(height: 32),
-      const _Label('Reorder experiment (#3)'),
+      const _Label('Rotation'),
       const SizedBox(height: 4),
       Text(
-        'Each tile picks a random ring colour + #id once. Shuffle and watch '
-        'whether that state follows the name.',
+        'Rotate promotes the next person to featured and demotes the speaker; '
+        "each tile's state (ring colour + #id) follows the person. While "
+        "watching you're a grid tile; when you reach the front you present, "
+        'with no self-view.',
         style: TextStyle(
           fontSize: 12,
           color: Colors.white.withValues(alpha: 0.5),
         ),
       ),
+      const SizedBox(height: 8),
+      Row(
+        children: [
+          const Icon(
+            Icons.visibility_outlined,
+            size: 14,
+            color: Colors.white54,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              viewStatus,
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF9DD2FF),
+              ),
+            ),
+          ),
+        ],
+      ),
       const SizedBox(height: 10),
       FilledButton.tonalIcon(
-        onPressed: participantCount > 1 ? onShuffle : null,
-        icon: const Icon(Icons.shuffle, size: 18),
-        label: const Text('Shuffle participants'),
-      ),
-      SwitchListTile(
-        contentPadding: EdgeInsets.zero,
-        title: const Text('Propagate keys'),
-        subtitle: Text(
-          useKeys ? 'state follows the person' : 'state sticks to the slot',
-        ),
-        value: useKeys,
-        onChanged: onUseKeys,
+        onPressed: canRotate ? onRotate : null,
+        icon: const Icon(Icons.rotate_left, size: 18),
+        label: const Text('Rotate participants'),
       ),
       const Divider(height: 32),
 
